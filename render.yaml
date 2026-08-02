@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: otm-config-portal
+    runtime: static
+    staticPublishPath: .
+    buildCommand: ""
