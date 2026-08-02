@@ -21,6 +21,24 @@ async function getDefaultConnectionId(): Promise<number> {
   return ins.rows[0].id;
 }
 
+// Friendly index so the base URL isn't a bare 404.
+app.get("/", (_req, res) => {
+  res.json({
+    service: "otm-config-api",
+    status: "ok",
+    docs: "https://github.com/VVISTECH-git/otm-config",
+    endpoints: {
+      health: "GET /health",
+      tables: "GET /api/tables",
+      countSweep: "POST /api/count-sweep",
+      toggleTable: "PUT /api/tables/:name  { enabled: boolean }",
+      run: "POST /api/runs",
+      runs: "GET /api/runs",
+      export: "GET /api/export (not implemented yet)",
+    },
+  });
+});
+
 app.get("/health", (_req, res) => {
   res.json({ ok: true, missingEnv: assertConfig() });
 });
