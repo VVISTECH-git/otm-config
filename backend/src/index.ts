@@ -6,6 +6,7 @@ import { q } from "./db";
 import { sweepCounts } from "./services/countSweep";
 import { runFetch } from "./services/fetchStore";
 import { classifyCategory } from "./services/classify";
+import { buildWorkbook } from "./services/exporter";
 
 const app = express();
 app.use(cors());
@@ -116,12 +117,14 @@ app.post("/api/seed", async (req, res, next) => {
   }
 });
 
-// Run: delta-fetch enabled tables into the store.
+// Run: delta-fetch enabled tables into the store (background; poll GET /api/runs).
 app.post("/api/runs", async (_req, res, next) => {
   try {
     const cid = await getDefaultConnectionId();
-    const r = await runFetch(cid);
-    res.json({ ok: true, ...r });
+    const run = await q(`insert into fetch_run (connection_id) values ($1) returning id`, [cid]);
+    const runId = run.rows[0].id as number;
+    runFetch(cid, runId).catch((e) => console.error("run failed:", e));
+    res.status(202).json({ ok: true, runId });
   } catch (e) {
     next(e);
   }
@@ -140,9 +143,18 @@ app.get("/api/runs", async (_req, res, next) => {
   }
 });
 
-// TODO: exporter -> standard config .xlsx from otm_config_record.
-app.get("/api/export", (_req, res) => {
-  res.status(501).json({ error: "exporter not implemented yet" });
+// Standard config .xlsx built from the extracted records.
+app.get("/api/export", async (_req, res, next) => {
+  try {
+    const cid = await getDefaultConnectionId();
+    const buf = await buildWorkbook(cid);
+    const stamp = new Date().toISOString().slice(0, 10);
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", `attachment; filename="otm_config_TMS_${stamp}.xlsx"`);
+    res.send(buf);
+  } catch (e) {
+    next(e);
+  }
 });
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars

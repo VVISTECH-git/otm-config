@@ -27,6 +27,7 @@
   .scope{font-size:12px;color:var(--muted)} .scope b{color:var(--accent)}
   .lede{color:var(--muted);font-size:12.5px;margin-top:4px}
   .lede code{font-family:ui-monospace,Consolas,monospace;font-size:11.5px;background:var(--panel-2);border:1px solid var(--line);border-radius:4px;padding:1px 5px}
+  .runstat{color:var(--muted);font-size:12px;margin-top:8px} .runstat b{color:var(--ink)}
   .stats{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}
   .stat{background:var(--panel-2);border:1px solid var(--line);border-radius:9px;padding:7px 12px;min-width:86px}
   .stat .k{font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
@@ -89,9 +90,12 @@
     <label class="tg"><input type="checkbox" id="hideEmpty" checked> hide empty</label>
     <label class="tg"><input type="checkbox" id="onlySel"> only selected</label>
     <button class="ghost" id="refreshBtn">Refresh</button>
-    <button class="ghost" id="sweepBtn">Run count sweep</button>
-    <button id="exportBtn">Export selection</button>
+    <button class="ghost" id="sweepBtn">Count sweep</button>
+    <button id="runBtn">Run extraction</button>
+    <button class="ghost" id="xlsxBtn">Download .xlsx</button>
+    <button class="ghost" id="exportBtn">Export list (JSON)</button>
   </div>
+  <div id="runStatus" class="runstat"></div>
 </header>
 <main>
   <div id="msg" class="msg">Connecting to the API… (free-tier server may take ~30–60s to wake)</div>
@@ -226,7 +230,40 @@ $("exportBtn").onclick=()=>{
   const blob=new Blob([JSON.stringify({domain:"TMS",generated:new Date().toISOString(),count:chosen.length,tables:chosen},null,2)],{type:"application/json"});
   const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="tms_config_tables.json";a.click();
 };
-load();
+function showLastRun(r){
+  const el=$("runStatus");if(!el)return;
+  if(!r){el.textContent="";return;}
+  const when=r.finished_at?new Date(r.finished_at).toLocaleString():"in progress…";
+  el.innerHTML=`Last extraction: <b>${r.status||"running"}</b> · ${r.tables_fetched||0} tables · ${nf(r.records_upserted||0)} records · ${when}`+
+    (r.error?` · <span style="color:var(--bad)">${r.error.slice(0,80)}</span>`:"");
+}
+async function loadLastRun(){try{const runs=await api("/api/runs");showLastRun(runs[0]);}catch{}}
+$("runBtn").onclick=async()=>{
+  const sel=DATA.filter(d=>d.enabled).length;
+  if(!sel){toast("Select at least one table first","bad");return;}
+  if(!confirm(`Run extraction for ${sel} selected table(s)? This pulls their TMS rows into the store.`))return;
+  $("runBtn").disabled=true;toast("Extraction started…");
+  try{
+    await api("/api/runs",{method:"POST"});
+    let last=null;
+    for(let i=0;i<90;i++){
+      await new Promise(r=>setTimeout(r,4000));
+      const runs=await api("/api/runs");last=runs[0];showLastRun(last);
+      if(last&&last.finished_at){toast(`Run ${last.status}: ${last.tables_fetched} tables, ${nf(last.records_upserted)} records`,last.status==="error"?"bad":"ok");break;}
+    }
+  }catch(e){toast("Run failed: "+e.message,"bad");}
+  $("runBtn").disabled=false;
+};
+$("xlsxBtn").onclick=async()=>{
+  $("xlsxBtn").disabled=true;toast("Building workbook…");
+  try{
+    const r=await fetch(API+"/api/export");if(!r.ok)throw new Error("HTTP "+r.status);
+    const blob=await r.blob();const a=document.createElement("a");
+    a.href=URL.createObjectURL(blob);a.download="otm_config_TMS.xlsx";a.click();toast("Downloaded","ok");
+  }catch(e){toast("Export failed: "+e.message,"bad");}
+  $("xlsxBtn").disabled=false;
+};
+load();loadLastRun();
 </script>
 </body>
 </html>
