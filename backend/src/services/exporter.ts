@@ -4,32 +4,61 @@ import { q } from "../db";
 const HDR = { bold: true } as const;
 const HDR_FILL = { type: "pattern", pattern: "solid", fgColor: { argb: "FFEDF1FD" } } as const;
 
-/** Excel sheet names: <=31 chars, no []:*?/\, and unique. */
-function sheetName(name: string, used: Set<string>): string {
-  let base = name.slice(0, 31).replace(/[\\/?*[\]:]/g, "_");
-  let n = base;
-  let i = 1;
-  while (used.has(n.toLowerCase())) n = base.slice(0, 28) + "_" + ++i;
-  used.add(n.toLowerCase());
-  return n;
+// Always-noise columns hidden in the curated view (audit + constant domain).
+const NOISE = new Set(["DOMAIN_NAME", "INSERT_DATE", "INSERT_USER", "UPDATE_DATE", "UPDATE_USER"]);
+
+type Rec = { payload: Record<string, unknown> };
+
+/**
+ * Curate columns for a readable config document:
+ *  - drop audit/domain noise,
+ *  - drop columns that are empty across every row,
+ *  - order identity (_XID, _GID) then name/description, then the rest.
+ * `raw` returns every column in first-seen order (escape hatch).
+ */
+function curateColumns(records: Rec[], raw: boolean): string[] {
+  const all: string[] = [];
+  const seen = new Set<string>();
+  for (const r of records) {
+    for (const k of Object.keys(r.payload)) if (!seen.has(k)) { seen.add(k); all.push(k); }
+  }
+  if (raw) return all;
+
+  const nonEmpty = new Set<string>();
+  for (const r of records) {
+    for (const k of all) {
+      const v = r.payload[k];
+      if (v != null && String(v).trim() !== "") nonEmpty.add(k);
+    }
+  }
+  let cols = all.filter((k) => !NOISE.has(k) && nonEmpty.has(k));
+  if (cols.length === 0) cols = all.filter((k) => !NOISE.has(k)); // fallback
+  if (cols.length === 0) cols = all;
+
+  const rank = (k: string) =>
+    /_XID$/.test(k) ? 0 : /_GID$/.test(k) ? 1 : /NAME|DESC/.test(k) ? 2 : 3;
+
+  return cols
+    .map((k, i) => [k, i] as const)
+    .sort((a, b) => rank(a[0]) - rank(b[0]) || a[1] - b[1])
+    .map(([k]) => k);
 }
 
 /**
- * Build the standard config workbook from what's been extracted into
- * otm_config_record: a Summary sheet + one sheet per table (full stored rows,
- * columns = union of the JSON payload keys for that table).
+ * Build the standard config workbook from extracted records: a Summary sheet +
+ * one curated sheet per table. `raw` keeps every column.
  */
-export async function buildWorkbook(connectionId: number): Promise<Buffer> {
+export async function buildWorkbook(connectionId: number, raw = false): Promise<Buffer> {
   const wb = new ExcelJS.Workbook();
   wb.creator = "otm-config-portal";
   wb.created = new Date();
 
   const tables = await q(
     `select r.table_name,
-            count(*)::int              as records,
-            max(t.category)            as category,
-            max(t.tms_row_count)       as tms_rows,
-            max(t.last_fetched_at)     as last_fetched
+            count(*)::int          as records,
+            max(t.category)        as category,
+            max(t.tms_row_count)   as tms_rows,
+            max(t.last_fetched_at) as last_fetched
      from otm_config_record r
      left join otm_config_table t
        on t.connection_id = r.connection_id and t.table_name = r.table_name
@@ -64,6 +93,8 @@ export async function buildWorkbook(connectionId: number): Promise<Buffer> {
       lf: row.last_fetched ? new Date(row.last_fetched).toISOString().slice(0, 19).replace("T", " ") : "",
     });
   }
+  summary.addRow({});
+  summary.addRow({ t: raw ? "All columns shown (raw)." : "Columns curated: audit & empty columns hidden. Append ?raw=true for all columns." });
 
   const used = new Set<string>(["summary"]);
   for (const row of tables.rows) {
@@ -73,15 +104,7 @@ export async function buildWorkbook(connectionId: number): Promise<Buffer> {
       [connectionId, row.table_name],
     );
 
-    // union of columns across this table's payloads, preserving first-seen order
-    const cols: string[] = [];
-    const seen = new Set<string>();
-    for (const r of recs.rows) {
-      for (const k of Object.keys(r.payload)) {
-        if (!seen.has(k)) { seen.add(k); cols.push(k); }
-      }
-    }
-
+    const cols = curateColumns(recs.rows as Rec[], raw);
     const ws = wb.addWorksheet(sheetName(row.table_name, used));
     ws.columns = cols.map((c) => ({ header: c, key: c, width: Math.min(45, Math.max(10, c.length + 2)) }));
     if (cols.length) {
@@ -89,8 +112,21 @@ export async function buildWorkbook(connectionId: number): Promise<Buffer> {
       ws.getRow(1).eachCell((c) => (c.fill = HDR_FILL as any));
       ws.views = [{ state: "frozen", ySplit: 1 }];
     }
-    for (const r of recs.rows) ws.addRow(r.payload);
+    for (const r of recs.rows) {
+      const p = r.payload as Record<string, unknown>;
+      ws.addRow(Object.fromEntries(cols.map((c) => [c, p[c] ?? null])));
+    }
   }
 
   return Buffer.from(await wb.xlsx.writeBuffer());
+}
+
+/** Excel sheet names: <=31 chars, no []:*?/\, and unique. */
+function sheetName(name: string, used: Set<string>): string {
+  let base = name.slice(0, 31).replace(/[\\/?*[\]:]/g, "_");
+  let n = base;
+  let i = 1;
+  while (used.has(n.toLowerCase())) n = base.slice(0, 28) + "_" + ++i;
+  used.add(n.toLowerCase());
+  return n;
 }

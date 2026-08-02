@@ -144,10 +144,11 @@ app.get("/api/runs", async (_req, res, next) => {
 });
 
 // Standard config .xlsx built from the extracted records.
-app.get("/api/export", async (_req, res, next) => {
+app.get("/api/export", async (req, res, next) => {
   try {
     const cid = await getDefaultConnectionId();
-    const buf = await buildWorkbook(cid);
+    const raw = req.query.raw === "true" || req.query.raw === "1";
+    const buf = await buildWorkbook(cid, raw);
     const stamp = new Date().toISOString().slice(0, 10);
     res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
     res.setHeader("Content-Disposition", `attachment; filename="otm_config_TMS_${stamp}.xlsx"`);
