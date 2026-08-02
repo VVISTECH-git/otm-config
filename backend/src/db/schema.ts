@@ -51,4 +51,7 @@ create table if not exists fetch_run (
   records_upserted  int not null default 0,
   error             text
 );
+
+-- idempotent column adds (apply to already-created tables on redeploy)
+alter table otm_config_table add column if not exists category text;
 `;

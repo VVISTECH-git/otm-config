@@ -26,16 +26,28 @@ function escapeXml(s: string): string {
 export async function runQuery(
   sql: string,
   rootName = "Row",
+  timeoutMs = 60000,
 ): Promise<Record<string, string>[]> {
   const body =
     `<sql2xml><Query><RootName>${rootName}</RootName>` +
     `<Statement>${escapeXml(sql)}</Statement></Query></sql2xml>`;
 
-  const res = await fetch(endpoint(), {
-    method: "POST",
-    headers: { "Content-Type": "text/xml", Authorization: authHeader() },
-    body,
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let res: Response;
+  try {
+    res = await fetch(endpoint(), {
+      method: "POST",
+      headers: { "Content-Type": "text/xml", Authorization: authHeader() },
+      body,
+      signal: controller.signal,
+    });
+  } catch (e: any) {
+    if (e?.name === "AbortError") throw new Error(`DBXMLServlet timeout after ${timeoutMs}ms`);
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
 
   const text = await res.text();
   if (!res.ok) {

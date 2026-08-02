@@ -5,10 +5,11 @@ import { migrate } from "./db/migrate";
 import { q } from "./db";
 import { sweepCounts } from "./services/countSweep";
 import { runFetch } from "./services/fetchStore";
+import { classifyCategory } from "./services/classify";
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "8mb" }));
 
 /** Single default connection for now (multi-connection UI comes later). */
 async function getDefaultConnectionId(): Promise<number> {
@@ -48,7 +49,7 @@ app.get("/api/tables", async (_req, res, next) => {
   try {
     const cid = await getDefaultConnectionId();
     const r = await q(
-      `select table_name, tms_row_count, enabled
+      `select table_name, tms_row_count, enabled, category
        from otm_config_table where connection_id=$1
        order by tms_row_count desc nulls last, table_name`,
       [cid],
@@ -70,15 +71,46 @@ app.post("/api/count-sweep", async (_req, res, next) => {
   }
 });
 
-// Toggle a table as configuration (the checkbox).
+// Update a table row: select it (enabled) and/or set its category. Either or both.
 app.put("/api/tables/:name", async (req, res, next) => {
   try {
     const cid = await getDefaultConnectionId();
+    const { enabled, category } = req.body ?? {};
+    const sets: string[] = [];
+    const vals: unknown[] = [cid, req.params.name];
+    if (typeof enabled === "boolean") { sets.push(`enabled=$${vals.length + 1}`); vals.push(enabled); }
+    if (typeof category === "string") { sets.push(`category=$${vals.length + 1}`); vals.push(category); }
+    if (sets.length === 0) return res.status(400).json({ error: "provide 'enabled' and/or 'category'" });
     await q(
-      `update otm_config_table set enabled=$3 where connection_id=$1 and table_name=$2`,
-      [cid, req.params.name, !!req.body.enabled],
+      `update otm_config_table set ${sets.join(", ")} where connection_id=$1 and table_name=$2`,
+      vals,
     );
     res.json({ ok: true });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// Bulk-seed the manifest from a precomputed list [{table, tms_rows, category}].
+app.post("/api/seed", async (req, res, next) => {
+  try {
+    const cid = await getDefaultConnectionId();
+    const rows = Array.isArray(req.body?.tables) ? req.body.tables : [];
+    let seeded = 0;
+    for (const row of rows) {
+      if (!row?.table) continue;
+      await q(
+        `insert into otm_config_table (connection_id, table_name, tms_row_count, category, last_swept_at)
+         values ($1,$2,$3,$4, now())
+         on conflict (connection_id, table_name)
+         do update set tms_row_count = excluded.tms_row_count,
+                       category = coalesce(otm_config_table.category, excluded.category),
+                       last_swept_at = now()`,
+        [cid, row.table, row.tms_rows ?? null, row.category ?? classifyCategory(row.table)],
+      );
+      seeded++;
+    }
+    res.json({ ok: true, seeded });
   } catch (e) {
     next(e);
   }
