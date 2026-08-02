@@ -10,38 +10,38 @@ const NOISE = new Set(["DOMAIN_NAME", "INSERT_DATE", "INSERT_USER", "UPDATE_DATE
 type Rec = { payload: Record<string, unknown> };
 
 /**
- * Curate columns for a readable config document:
- *  - drop audit/domain noise,
- *  - drop columns that are empty across every row,
- *  - order identity (_XID, _GID) then name/description, then the rest.
- * `raw` returns every column in first-seen order (escape hatch).
+ * Curate columns for a readable config document, PRESERVING OTM's native
+ * column order (DDL order, from otm_config_table.column_order):
+ *  - order every column by OTM's column_id sequence,
+ *  - (unless raw) drop audit/domain noise and columns empty across every row,
+ *  - never reorder beyond OTM's own sequence.
  */
-function curateColumns(records: Rec[], raw: boolean): string[] {
+function curateColumns(records: Rec[], raw: boolean, otmOrder: string[] | null): string[] {
   const all: string[] = [];
   const seen = new Set<string>();
   for (const r of records) {
     for (const k of Object.keys(r.payload)) if (!seen.has(k)) { seen.add(k); all.push(k); }
   }
-  if (raw) return all;
+
+  // Order by OTM's DDL sequence; any key not in it (shouldn't happen) goes last.
+  let ordered = all;
+  if (otmOrder && otmOrder.length) {
+    const idx = new Map(otmOrder.map((c, i) => [c, i]));
+    ordered = all.slice().sort((a, b) => (idx.get(a) ?? 1e9) - (idx.get(b) ?? 1e9));
+  }
+  if (raw) return ordered;
 
   const nonEmpty = new Set<string>();
   for (const r of records) {
-    for (const k of all) {
+    for (const k of ordered) {
       const v = r.payload[k];
       if (v != null && String(v).trim() !== "") nonEmpty.add(k);
     }
   }
-  let cols = all.filter((k) => !NOISE.has(k) && nonEmpty.has(k));
-  if (cols.length === 0) cols = all.filter((k) => !NOISE.has(k)); // fallback
-  if (cols.length === 0) cols = all;
-
-  const rank = (k: string) =>
-    /_XID$/.test(k) ? 0 : /_GID$/.test(k) ? 1 : /NAME|DESC/.test(k) ? 2 : 3;
-
-  return cols
-    .map((k, i) => [k, i] as const)
-    .sort((a, b) => rank(a[0]) - rank(b[0]) || a[1] - b[1])
-    .map(([k]) => k);
+  let cols = ordered.filter((k) => !NOISE.has(k) && nonEmpty.has(k));
+  if (cols.length === 0) cols = ordered.filter((k) => !NOISE.has(k));
+  if (cols.length === 0) cols = ordered;
+  return cols; // OTM order preserved
 }
 
 /**
@@ -104,7 +104,12 @@ export async function buildWorkbook(connectionId: number, raw = false): Promise<
       [connectionId, row.table_name],
     );
 
-    const cols = curateColumns(recs.rows as Rec[], raw);
+    const meta = await q(
+      `select column_order from otm_config_table where connection_id=$1 and table_name=$2`,
+      [connectionId, row.table_name],
+    );
+    const otmOrder = (meta.rows[0]?.column_order as string[] | null) ?? null;
+    const cols = curateColumns(recs.rows as Rec[], raw, otmOrder);
     const ws = wb.addWorksheet(sheetName(row.table_name, used));
     ws.columns = cols.map((c) => ({ header: c, key: c, width: Math.min(45, Math.max(10, c.length + 2)) }));
     if (cols.length) {

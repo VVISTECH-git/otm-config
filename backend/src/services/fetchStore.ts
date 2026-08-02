@@ -67,10 +67,22 @@ export async function runFetch(connectionId: number, runId: number) {
         recordsUpserted++;
       }
 
+      // capture OTM's real column order (DDL order) so the export matches OTM exactly
+      let colOrder: string[] = [];
+      try {
+        const oc = await runQuery(
+          `select column_name from all_tab_columns where owner='GLOGOWNER' and table_name='${tbl}' order by column_id`,
+          "C",
+          30000,
+        );
+        colOrder = oc.map((r) => r.COLUMN_NAME).filter(Boolean);
+      } catch { /* non-fatal */ }
+
       await q(
-        `update otm_config_table set last_watermark=$2, last_fetched_at=now()
+        `update otm_config_table set last_watermark=$2, last_fetched_at=now(),
+            column_order = case when $4::jsonb is null then column_order else $4::jsonb end
          where connection_id=$1 and table_name=$3`,
-        [connectionId, maxUpd, tbl],
+        [connectionId, maxUpd, tbl, colOrder.length ? JSON.stringify(colOrder) : null],
       );
       tablesFetched++;
     } catch (e: any) {

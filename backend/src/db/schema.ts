@@ -54,4 +54,5 @@ create table if not exists fetch_run (
 
 -- idempotent column adds (apply to already-created tables on redeploy)
 alter table otm_config_table add column if not exists category text;
+alter table otm_config_table add column if not exists column_order jsonb;
 `;
