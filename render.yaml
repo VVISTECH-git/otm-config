@@ -1,4 +1,34 @@
+databases:
+  - name: otm-config-db
+    plan: free
+    databaseName: otmconfig
+    user: otmconfig
+
 services:
+  # Node/TypeScript API + config store
+  - type: web
+    name: otm-config-api
+    runtime: node
+    rootDir: backend
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: otm-config-db
+          property: connectionString
+      - key: OTM_BASE_URL
+        sync: false   # set in dashboard
+      - key: OTM_USER
+        sync: false   # set in dashboard
+      - key: OTM_PASS
+        sync: false   # set in dashboard (secret)
+      - key: OTM_DOMAIN
+        value: TMS
+
+  # Static picker front-end (current snapshot; will later call the API)
   - type: web
     name: otm-config-portal
     runtime: static
