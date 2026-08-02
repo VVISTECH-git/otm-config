@@ -89,6 +89,8 @@
     </select>
     <label class="tg"><input type="checkbox" id="hideEmpty" checked> hide empty</label>
     <label class="tg"><input type="checkbox" id="onlySel"> only selected</label>
+    <button class="ghost" id="selAllBtn">Select all shown</button>
+    <button class="ghost" id="clearBtn">Deselect all</button>
     <button class="ghost" id="refreshBtn">Refresh</button>
     <button class="ghost" id="sweepBtn">Count sweep</button>
     <button id="runBtn">Run extraction</button>
@@ -207,6 +209,15 @@ function stats(){
 }
 document.querySelectorAll("th[data-sort]").forEach(th=>th.onclick=()=>{const k=th.dataset.sort;if(k===sortKey)sortDir*=-1;else{sortKey=k;sortDir=k==="count"?-1:1;}render();});
 ["q","catFilter","typeFilter","hideEmpty","onlySel"].forEach(id=>$(id).addEventListener("input",()=>DATA.length&&render()));
+async function bulkSet(names,enabled){
+  if(!names.length){toast(enabled?"Nothing shown to select":"Nothing selected","bad");return;}
+  names.forEach(n=>{if(byName[n])byName[n].enabled=enabled;});stats();render();
+  try{await api("/api/tables/bulk",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tables:names,enabled})});
+    toast((enabled?"Selected ":"Deselected ")+nf(names.length),"ok");}
+  catch(e){names.forEach(n=>{if(byName[n])byName[n].enabled=!enabled;});stats();render();toast("Save failed","bad");}
+}
+$("selAllBtn").onclick=()=>{const names=view().map(d=>d.name);if(names.length>300&&!confirm(`Select all ${names.length} shown tables?`))return;bulkSet(names,true);};
+$("clearBtn").onclick=()=>{const names=DATA.filter(d=>d.enabled).map(d=>d.name);if(names.length&&!confirm(`Deselect all ${names.length} selected?`))return;bulkSet(names,false);};
 $("refreshBtn").onclick=load;
 $("sweepBtn").onclick=async()=>{
   if(!confirm("Run a full count sweep against OTM? Takes a few minutes."))return;

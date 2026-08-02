@@ -92,6 +92,26 @@ app.put("/api/tables/:name", async (req, res, next) => {
   }
 });
 
+// Bulk enable/disable a set of tables in one query (for Select-all / Deselect-all).
+app.post("/api/tables/bulk", async (req, res, next) => {
+  try {
+    const cid = await getDefaultConnectionId();
+    const { tables, enabled } = req.body ?? {};
+    if (!Array.isArray(tables) || typeof enabled !== "boolean") {
+      return res.status(400).json({ error: "provide tables[] and enabled:boolean" });
+    }
+    if (tables.length === 0) return res.json({ ok: true, updated: 0 });
+    const r = await q(
+      `update otm_config_table set enabled=$3
+       where connection_id=$1 and table_name = ANY($2::text[])`,
+      [cid, tables, enabled],
+    );
+    res.json({ ok: true, updated: r.rowCount });
+  } catch (e) {
+    next(e);
+  }
+});
+
 // Bulk-seed the manifest from a precomputed list [{table, tms_rows, category}].
 app.post("/api/seed", async (req, res, next) => {
   try {
