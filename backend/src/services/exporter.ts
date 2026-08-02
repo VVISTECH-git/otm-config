@@ -3,6 +3,7 @@ import { q } from "../db";
 
 const HDR = { bold: true } as const;
 const HDR_FILL = { type: "pattern", pattern: "solid", fgColor: { argb: "FFEDF1FD" } } as const;
+const YELLOW = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFF2CC" } } as const;
 
 // Always-noise columns hidden in the curated view (audit + constant domain).
 const NOISE = new Set(["DOMAIN_NAME", "INSERT_DATE", "INSERT_USER", "UPDATE_DATE", "UPDATE_USER"]);
@@ -23,7 +24,6 @@ function curateColumns(records: Rec[], raw: boolean, otmOrder: string[] | null):
     for (const k of Object.keys(r.payload)) if (!seen.has(k)) { seen.add(k); all.push(k); }
   }
 
-  // Order by OTM's DDL sequence; any key not in it (shouldn't happen) goes last.
   let ordered = all;
   if (otmOrder && otmOrder.length) {
     const idx = new Map(otmOrder.map((c, i) => [c, i]));
@@ -41,12 +41,34 @@ function curateColumns(records: Rec[], raw: boolean, otmOrder: string[] | null):
   let cols = ordered.filter((k) => !NOISE.has(k) && nonEmpty.has(k));
   if (cols.length === 0) cols = ordered.filter((k) => !NOISE.has(k));
   if (cols.length === 0) cols = ordered;
-  return cols; // OTM order preserved
+  return cols;
 }
 
+/** Excel sheet names: <=31 chars, no []:*?/\, and unique. */
+function sheetName(name: string, used: Set<string>): string {
+  let base = name.slice(0, 31).replace(/[\\/?*[\]:]/g, "_");
+  let n = base;
+  let i = 1;
+  while (used.has(n.toLowerCase())) n = base.slice(0, 28) + "_" + ++i;
+  used.add(n.toLowerCase());
+  return n;
+}
+
+const REG_COLS = [
+  "Config ID", "Functional Area", "OTM Object / Table", "Configuration Item",
+  "Business Rule / Description", "Configured Value / Setting", "OTM Navigation Path",
+  "FRS Ref", "Setup Method", "Records", "Owner", "Status",
+];
+const REG_WIDTHS = [12, 22, 28, 26, 34, 30, 34, 10, 14, 9, 16, 14];
+const HUMAN_COLS = [5, 6, 7, 8, 9, 11, 12]; // 1-based: user-maintained cells
+const CAT_RANK: Record<string, number> = { Configuration: 0, Master: 1, Transactional: 2 };
+
 /**
- * Build the standard config workbook from extracted records: a Summary sheet +
- * one curated sheet per table. `raw` keeps every column.
+ * Build the config workbook in the KRAFT style:
+ *  - a "Configuration Register" index sheet (one row per extracted object,
+ *    grouped by Category as Functional Area; mechanical columns auto-filled,
+ *    design columns left yellow for the team; each row links to its data sheet),
+ *  - one data sheet per table in OTM column order.
  */
 export async function buildWorkbook(connectionId: number, raw = false): Promise<Buffer> {
   const wb = new ExcelJS.Workbook();
@@ -57,60 +79,80 @@ export async function buildWorkbook(connectionId: number, raw = false): Promise<
     `select r.table_name,
             count(*)::int          as records,
             max(t.category)        as category,
-            max(t.tms_row_count)   as tms_rows,
-            max(t.last_fetched_at) as last_fetched
+            max(t.tms_row_count)   as tms_rows
      from otm_config_record r
      left join otm_config_table t
        on t.connection_id = r.connection_id and t.table_name = r.table_name
      where r.connection_id = $1 and r.deleted = false
-     group by r.table_name
-     order by r.table_name`,
+     group by r.table_name`,
     [connectionId],
   );
 
-  const summary = wb.addWorksheet("Summary");
-  summary.columns = [
-    { header: "Table", key: "t", width: 40 },
-    { header: "Category", key: "c", width: 16 },
-    { header: "Records extracted", key: "n", width: 18 },
-    { header: "TMS rows", key: "tms", width: 14 },
-    { header: "Last fetched (UTC)", key: "lf", width: 22 },
-  ];
-  summary.getRow(1).font = HDR;
-  summary.getRow(1).eachCell((c) => (c.fill = HDR_FILL as any));
+  const reg = wb.addWorksheet("Configuration Register");
 
   if (tables.rows.length === 0) {
-    summary.addRow({ t: "No records stored yet — select tables and run an extraction first." });
+    reg.getCell(1, 1).value = "No records stored yet — select tables and run an extraction first.";
     return Buffer.from(await wb.xlsx.writeBuffer());
   }
 
-  for (const row of tables.rows) {
-    summary.addRow({
-      t: row.table_name,
-      c: row.category ?? "",
-      n: Number(row.records),
-      tms: row.tms_rows == null ? "" : Number(row.tms_rows),
-      lf: row.last_fetched ? new Date(row.last_fetched).toISOString().slice(0, 19).replace("T", " ") : "",
-    });
-  }
-  summary.addRow({});
-  summary.addRow({ t: raw ? "All columns shown (raw)." : "Columns curated: audit & empty columns hidden. Append ?raw=true for all columns." });
+  const sorted = tables.rows.slice().sort(
+    (a, b) => (CAT_RANK[a.category] ?? 9) - (CAT_RANK[b.category] ?? 9) || a.table_name.localeCompare(b.table_name),
+  );
 
-  const used = new Set<string>(["summary"]);
-  for (const row of tables.rows) {
+  // reserve data-sheet names up front so the register can link to them
+  const used = new Set<string>(["configuration register"]);
+  const nameOf = new Map<string, string>();
+  for (const t of sorted) nameOf.set(t.table_name, sheetName(t.table_name, used));
+
+  // --- Register header block ---
+  REG_WIDTHS.forEach((w, i) => (reg.getColumn(i + 1).width = w));
+  reg.mergeCells(1, 1, 1, REG_COLS.length);
+  reg.getCell(1, 1).value = "Configuration Register — domain TMS";
+  reg.getCell(1, 1).font = { bold: true, size: 14 };
+  reg.mergeCells(2, 1, 2, REG_COLS.length);
+  reg.getCell(2, 1).value =
+    "LEGEND – Yellow cells are user-maintained (Business Rule, Configured Value, OTM Navigation Path, FRS Ref, Setup Method, Owner, Status). Each object links to its data sheet.";
+  reg.getCell(2, 1).font = { italic: true, color: { argb: "FF616D7B" } };
+  const hdr = reg.getRow(3);
+  REG_COLS.forEach((c, i) => {
+    const cell = hdr.getCell(i + 1);
+    cell.value = c;
+    cell.font = HDR;
+    cell.fill = HDR_FILL as any;
+  });
+  reg.views = [{ state: "frozen", ySplit: 3 }];
+
+  // --- Register rows ---
+  let rn = 4;
+  let id = 1;
+  for (const t of sorted) {
+    const sheet = nameOf.get(t.table_name)!;
+    const row = reg.getRow(rn++);
+    row.getCell(1).value = `CFG-${String(id++).padStart(3, "0")}`;
+    row.getCell(2).value = t.category ?? "";
+    const obj = row.getCell(3);
+    obj.value = { text: t.table_name, hyperlink: `#'${sheet}'!A1` } as any;
+    obj.font = { color: { argb: "FF3457D5" }, underline: true };
+    row.getCell(4).value = t.table_name;
+    row.getCell(10).value = Number(t.records);
+    for (const ci of HUMAN_COLS) row.getCell(ci).fill = YELLOW as any;
+  }
+
+  // --- Data sheets, in the same order, OTM column order ---
+  for (const t of sorted) {
     const recs = await q(
       `select payload from otm_config_record
        where connection_id=$1 and table_name=$2 and deleted=false order by pk_value`,
-      [connectionId, row.table_name],
+      [connectionId, t.table_name],
     );
-
     const meta = await q(
       `select column_order from otm_config_table where connection_id=$1 and table_name=$2`,
-      [connectionId, row.table_name],
+      [connectionId, t.table_name],
     );
     const otmOrder = (meta.rows[0]?.column_order as string[] | null) ?? null;
     const cols = curateColumns(recs.rows as Rec[], raw, otmOrder);
-    const ws = wb.addWorksheet(sheetName(row.table_name, used));
+
+    const ws = wb.addWorksheet(nameOf.get(t.table_name)!);
     ws.columns = cols.map((c) => ({ header: c, key: c, width: Math.min(45, Math.max(10, c.length + 2)) }));
     if (cols.length) {
       ws.getRow(1).font = HDR;
@@ -124,14 +166,4 @@ export async function buildWorkbook(connectionId: number, raw = false): Promise<
   }
 
   return Buffer.from(await wb.xlsx.writeBuffer());
-}
-
-/** Excel sheet names: <=31 chars, no []:*?/\, and unique. */
-function sheetName(name: string, used: Set<string>): string {
-  let base = name.slice(0, 31).replace(/[\\/?*[\]:]/g, "_");
-  let n = base;
-  let i = 1;
-  while (used.has(n.toLowerCase())) n = base.slice(0, 28) + "_" + ++i;
-  used.add(n.toLowerCase());
-  return n;
 }
