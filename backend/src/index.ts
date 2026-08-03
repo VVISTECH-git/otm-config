@@ -178,6 +178,28 @@ app.get("/api/export", async (req, res, next) => {
   }
 });
 
+// Purge extracted records (all, or ?table=NAME). Resets watermark so a re-Run
+// does a full pull. Does NOT touch the table list / categories / selections.
+app.delete("/api/records", async (req, res, next) => {
+  try {
+    const cid = await getDefaultConnectionId();
+    const table = typeof req.query.table === "string" ? req.query.table : null;
+    let deleted: number | null = 0;
+    if (table) {
+      const r = await q(`delete from otm_config_record where connection_id=$1 and table_name=$2`, [cid, table]);
+      deleted = r.rowCount;
+      await q(`update otm_config_table set last_watermark=null, last_fetched_at=null where connection_id=$1 and table_name=$2`, [cid, table]);
+    } else {
+      const r = await q(`delete from otm_config_record where connection_id=$1`, [cid]);
+      deleted = r.rowCount;
+      await q(`update otm_config_table set last_watermark=null, last_fetched_at=null where connection_id=$1`, [cid]);
+    }
+    res.json({ ok: true, deleted, table: table ?? "(all)" });
+  } catch (e) {
+    next(e);
+  }
+});
+
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   console.error(err);

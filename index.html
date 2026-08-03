@@ -95,6 +95,7 @@
     <button class="ghost" id="sweepBtn">Count sweep</button>
     <button id="runBtn">Run extraction</button>
     <button class="ghost" id="xlsxBtn">Download .xlsx</button>
+    <button class="ghost" id="clearDataBtn">Clear extracted data</button>
     <button class="ghost" id="exportBtn">Export list (JSON)</button>
   </div>
   <div id="runStatus" class="runstat"></div>
@@ -264,6 +265,13 @@ $("runBtn").onclick=async()=>{
     }
   }catch(e){toast("Run failed: "+e.message,"bad");}
   $("runBtn").disabled=false;
+};
+$("clearDataBtn").onclick=async()=>{
+  if(!confirm("Delete ALL extracted data (the rows pulled by Run)? This does NOT touch your table list, categories, or selections."))return;
+  $("clearDataBtn").disabled=true;toast("Clearing…");
+  try{const r=await api("/api/records",{method:"DELETE"});toast("Cleared "+nf(r.deleted)+" records","ok");showLastRun(null);}
+  catch(e){toast("Clear failed: "+e.message,"bad");}
+  $("clearDataBtn").disabled=false;
 };
 $("xlsxBtn").onclick=async()=>{
   $("xlsxBtn").disabled=true;toast("Building workbook…");
