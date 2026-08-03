@@ -163,6 +163,46 @@ app.get("/api/runs", async (_req, res, next) => {
   }
 });
 
+// Tables with stored records + their OTM column order (for a local xlsx build).
+app.get("/api/records/list", async (_req, res, next) => {
+  try {
+    const cid = await getDefaultConnectionId();
+    const r = await q(
+      `select r.table_name, count(*)::int as records, max(t.category) as category
+       from otm_config_record r
+       left join otm_config_table t on t.connection_id=r.connection_id and t.table_name=r.table_name
+       where r.connection_id=$1 and r.deleted=false group by r.table_name order by r.table_name`,
+      [cid],
+    );
+    const out = [];
+    for (const row of r.rows) {
+      const m = await q(`select column_order from otm_config_table where connection_id=$1 and table_name=$2`, [cid, row.table_name]);
+      out.push({ table_name: row.table_name, records: row.records, category: row.category, column_order: m.rows[0]?.column_order ?? null });
+    }
+    res.json(out);
+  } catch (e) {
+    next(e);
+  }
+});
+
+// Paginated payloads for one table (small pages -> low server memory).
+app.get("/api/records/data", async (req, res, next) => {
+  try {
+    const cid = await getDefaultConnectionId();
+    const table = String(req.query.table ?? "");
+    const limit = Math.min(5000, Number(req.query.limit) || 2000);
+    const offset = Number(req.query.offset) || 0;
+    const r = await q(
+      `select payload from otm_config_record where connection_id=$1 and table_name=$2 and deleted=false
+       order by pk_value limit $3 offset $4`,
+      [cid, table, limit, offset],
+    );
+    res.json({ rows: r.rows.map((x) => x.payload) });
+  } catch (e) {
+    next(e);
+  }
+});
+
 // Standard config .xlsx built from the extracted records.
 app.get("/api/export", async (req, res, next) => {
   try {
