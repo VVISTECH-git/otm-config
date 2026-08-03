@@ -6,7 +6,7 @@ import { q } from "./db";
 import { sweepCounts } from "./services/countSweep";
 import { runFetch } from "./services/fetchStore";
 import { classifyCategory } from "./services/classify";
-import { buildWorkbook } from "./services/exporter";
+import { streamWorkbook } from "./services/exporter";
 
 const app = express();
 app.use(cors());
@@ -168,13 +168,13 @@ app.get("/api/export", async (req, res, next) => {
   try {
     const cid = await getDefaultConnectionId();
     const raw = req.query.raw === "true" || req.query.raw === "1";
-    const buf = await buildWorkbook(cid, raw);
     const stamp = new Date().toISOString().slice(0, 10);
     res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
     res.setHeader("Content-Disposition", `attachment; filename="otm_config_TMS_${stamp}.xlsx"`);
-    res.send(buf);
+    await streamWorkbook(cid, res, raw);
   } catch (e) {
-    next(e);
+    if (!res.headersSent) next(e);
+    else res.end();
   }
 });
 
