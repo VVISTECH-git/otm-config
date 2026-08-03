@@ -7,34 +7,7 @@ const HDR_FILL = { type: "pattern", pattern: "solid", fgColor: { argb: "FFEDF1FD
 const YELLOW = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFF2CC" } } as const;
 
 const NOISE = new Set(["DOMAIN_NAME", "INSERT_DATE", "INSERT_USER", "UPDATE_DATE", "UPDATE_USER"]);
-
-type Rec = { payload: Record<string, unknown> };
-
-function curateColumns(records: Rec[], raw: boolean, otmOrder: string[] | null): string[] {
-  const all: string[] = [];
-  const seen = new Set<string>();
-  for (const r of records) {
-    for (const k of Object.keys(r.payload)) if (!seen.has(k)) { seen.add(k); all.push(k); }
-  }
-  let ordered = all;
-  if (otmOrder && otmOrder.length) {
-    const idx = new Map(otmOrder.map((c, i) => [c, i]));
-    ordered = all.slice().sort((a, b) => (idx.get(a) ?? 1e9) - (idx.get(b) ?? 1e9));
-  }
-  if (raw) return ordered;
-
-  const nonEmpty = new Set<string>();
-  for (const r of records) {
-    for (const k of ordered) {
-      const v = r.payload[k];
-      if (v != null && String(v).trim() !== "") nonEmpty.add(k);
-    }
-  }
-  let cols = ordered.filter((k) => !NOISE.has(k) && nonEmpty.has(k));
-  if (cols.length === 0) cols = ordered.filter((k) => !NOISE.has(k));
-  if (cols.length === 0) cols = ordered;
-  return cols;
-}
+const PAGE = 2000; // rows fetched per DB round-trip (keeps memory flat)
 
 function sheetName(name: string, used: Set<string>): string {
   let base = name.slice(0, 31).replace(/[\\/?*[\]:]/g, "_");
@@ -43,6 +16,12 @@ function sheetName(name: string, used: Set<string>): string {
   while (used.has(n.toLowerCase())) n = base.slice(0, 28) + "_" + ++i;
   used.add(n.toLowerCase());
   return n;
+}
+
+/** Columns from OTM's stored DDL order (minus audit/domain noise unless raw). */
+function columnsFor(otmOrder: string[] | null, sampleKeys: string[], raw: boolean): string[] {
+  const base = otmOrder && otmOrder.length ? otmOrder.slice() : sampleKeys;
+  return raw ? base : base.filter((k) => !NOISE.has(k));
 }
 
 const REG_COLS = [
@@ -55,11 +34,10 @@ const HUMAN_COLS = [5, 6, 7, 8, 9, 11, 12];
 const CAT_RANK: Record<string, number> = { Configuration: 0, Master: 1, Transactional: 2 };
 
 /**
- * Stream the KRAFT-style config workbook to `out` with BOUNDED memory:
- * ExcelJS streaming WorkbookWriter flushes each sheet/row as it's committed,
- * and only one table's records are held at a time. Handles large volumes that
- * the in-memory builder OOMs on. (Register index sheet + one data sheet per
- * table in OTM column order.)
+ * Stream the KRAFT-style config workbook to `out` with FLAT memory:
+ * ExcelJS streaming writer + per-table reads paginated at PAGE rows, so peak
+ * memory is ~one page regardless of table size or total volume. Handles the
+ * large extractions that OOM the in-memory (and even naive-streaming) builder.
  */
 export async function streamWorkbook(connectionId: number, out: Writable, raw = false): Promise<void> {
   const wb = new ExcelJS.stream.xlsx.WorkbookWriter({ stream: out, useSharedStrings: false, useStyles: true });
@@ -89,61 +67,74 @@ export async function streamWorkbook(connectionId: number, out: Writable, raw = 
   const nameOf = new Map<string, string>();
   for (const t of sorted) nameOf.set(t.table_name, sheetName(t.table_name, used));
 
-  // Register header (no merges — keep streaming-safe)
+  // Register
   REG_WIDTHS.forEach((w, i) => (reg.getColumn(i + 1).width = w));
   reg.views = [{ state: "frozen", ySplit: 3 }];
-  const rTitle = reg.addRow(["Configuration Register — domain TMS"]);
-  rTitle.getCell(1).font = { bold: true, size: 14 };
-  rTitle.commit();
-  const rLeg = reg.addRow([
+  const rT = reg.addRow(["Configuration Register — domain TMS"]);
+  rT.getCell(1).font = { bold: true, size: 14 };
+  rT.commit();
+  const rL = reg.addRow([
     "LEGEND – Yellow cells are user-maintained (Business Rule, Configured Value, OTM Navigation Path, FRS Ref, Setup Method, Owner, Status). Each object links to its data sheet.",
   ]);
-  rLeg.getCell(1).font = { italic: true, color: { argb: "FF616D7B" } };
-  rLeg.commit();
-  const rHead = reg.addRow(REG_COLS);
-  rHead.eachCell((c) => { c.font = HDR; c.fill = HDR_FILL as any; });
-  rHead.commit();
-
+  rL.getCell(1).font = { italic: true, color: { argb: "FF616D7B" } };
+  rL.commit();
+  const rH = reg.addRow(REG_COLS);
+  rH.eachCell((c) => { c.font = HDR; c.fill = HDR_FILL as any; });
+  rH.commit();
   let id = 1;
   for (const t of sorted) {
-    const sheet = nameOf.get(t.table_name)!;
     const row = reg.addRow([
       `CFG-${String(id++).padStart(3, "0")}`, t.category ?? "", null, t.table_name,
       null, null, null, null, null, Number(t.records), null, null,
     ]);
     const obj = row.getCell(3);
-    obj.value = { text: t.table_name, hyperlink: `#'${sheet}'!A1` } as any;
+    obj.value = { text: t.table_name, hyperlink: `#'${nameOf.get(t.table_name)}'!A1` } as any;
     obj.font = { color: { argb: "FF3457D5" }, underline: true };
     for (const ci of HUMAN_COLS) row.getCell(ci).fill = YELLOW as any;
     row.commit();
   }
   reg.commit();
 
-  // Data sheets — one table at a time (bounded memory)
+  // Data sheets — paginated (flat memory)
   for (const t of sorted) {
-    const recs = await q(
-      `select payload from otm_config_record
-       where connection_id=$1 and table_name=$2 and deleted=false order by pk_value`,
-      [connectionId, t.table_name],
-    );
     const meta = await q(
       `select column_order from otm_config_table where connection_id=$1 and table_name=$2`,
       [connectionId, t.table_name],
     );
     const otmOrder = (meta.rows[0]?.column_order as string[] | null) ?? null;
-    const cols = curateColumns(recs.rows as Rec[], raw, otmOrder);
 
-    const ws = wb.addWorksheet(nameOf.get(t.table_name)!);
-    cols.forEach((c, i) => (ws.getColumn(i + 1).width = Math.min(45, Math.max(10, c.length + 2))));
-    ws.views = [{ state: "frozen", ySplit: 1 }];
-    const hr = ws.addRow(cols);
-    hr.eachCell((c) => { c.font = HDR; c.fill = HDR_FILL as any; });
-    hr.commit();
-    for (const r of recs.rows) {
-      const p = (r as Rec).payload;
-      ws.addRow(cols.map((c) => p[c] ?? null)).commit();
+    let cols: string[] | null = null;
+    let ws: ExcelJS.Worksheet | null = null;
+    let offset = 0;
+    for (;;) {
+      const batch = await q(
+        `select payload from otm_config_record
+         where connection_id=$1 and table_name=$2 and deleted=false
+         order by pk_value limit $3 offset $4`,
+        [connectionId, t.table_name, PAGE, offset],
+      );
+      if (batch.rows.length === 0) break;
+
+      if (!cols) {
+        const sample: string[] = [];
+        const seen = new Set<string>();
+        for (const r of batch.rows) for (const k of Object.keys(r.payload)) if (!seen.has(k)) { seen.add(k); sample.push(k); }
+        cols = columnsFor(otmOrder, sample, raw);
+        ws = wb.addWorksheet(nameOf.get(t.table_name)!);
+        cols.forEach((c, i) => (ws!.getColumn(i + 1).width = Math.min(45, Math.max(10, c.length + 2))));
+        ws.views = [{ state: "frozen", ySplit: 1 }];
+        const hr = ws.addRow(cols);
+        hr.eachCell((c) => { c.font = HDR; c.fill = HDR_FILL as any; });
+        hr.commit();
+      }
+      for (const r of batch.rows) {
+        const p = r.payload as Record<string, unknown>;
+        ws!.addRow(cols.map((c) => p[c] ?? null)).commit();
+      }
+      offset += batch.rows.length;
+      if (batch.rows.length < PAGE) break;
     }
-    ws.commit();
+    if (ws) ws.commit();
   }
 
   await wb.commit();
